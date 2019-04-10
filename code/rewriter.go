@@ -21,13 +21,15 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 )
 
 const (
-	packagePath  = "github.com/pingcap/failpoint"
-	packageName  = "failpoint"
-	evalFunction = "Eval"
+	packagePath         = "github.com/pingcap/failpoint"
+	packageName         = "failpoint"
+	evalFunction        = "Eval"
+	failpointNameGetter = "__failpointName"
 )
 
 type Rewriter struct {
@@ -414,7 +416,12 @@ func (r *Rewriter) rewriteFuncDecl(fn *ast.FuncDecl) error {
 	return r.rewriteStmts(fn.Body.List)
 }
 
-func (r *Rewriter) rewriteFile(path string) error {
+func (r *Rewriter) rewriteFile(path string) (err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			err = fmt.Errorf("%v\n%s", e, debug.Stack())
+		}
+	}()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 	if err != nil {
@@ -456,6 +463,18 @@ func (r *Rewriter) rewriteFile(path string) error {
 		return nil
 	}
 
+	// Generate binding code
+	found, err := isBindingFileExists(path)
+	if err != nil {
+		return err
+	}
+	if !found {
+		err := writeBindingFile(path, file.Name.Name)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Backup origin file and replace content
 	targetPath := path + failpointStashFileSuffix
 	if err := os.Rename(path, targetPath); err != nil {
@@ -480,6 +499,9 @@ func (r *Rewriter) Rewrite() error {
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		if strings.HasSuffix(path, failpointBindingFileName) {
 			return nil
 		}
 		// Will rewrite a file only if the file has imported "github.com/pingcap/failpoint"
